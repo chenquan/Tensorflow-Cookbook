@@ -31,11 +31,7 @@ def conv(x, channels, kernel=4, stride=2, pad=0, pad_type='zero', use_bias=True,
     with tf.variable_scope(scope):
         if pad > 0:
             h = x.get_shape().as_list()[1]
-            if h % stride == 0:
-                pad = pad * 2
-            else:
-                pad = max(kernel - (h % stride), 0)
-
+            pad = pad * 2 if h % stride == 0 else max(kernel - (h % stride), 0)
             pad_top = pad // 2
             pad_bottom = pad - pad_top
             pad_left = pad // 2
@@ -98,20 +94,19 @@ def partial_conv(x, channels, kernel=3, stride=2, use_bias=True, padding='SAME',
 
                     x = tf.nn.bias_add(x, bias)
                     x = x * update_mask
-        else:
-            if sn:
-                w = tf.get_variable("kernel", shape=[kernel, kernel, x.get_shape()[-1], channels],
-                                    initializer=weight_init, regularizer=weight_regularizer)
-                x = tf.nn.conv2d(input=x, filter=spectral_norm(w), strides=[1, stride, stride, 1], padding=padding)
-                if use_bias:
-                    bias = tf.get_variable("bias", [channels], initializer=tf.constant_initializer(0.0))
+        elif sn:
+            w = tf.get_variable("kernel", shape=[kernel, kernel, x.get_shape()[-1], channels],
+                                initializer=weight_init, regularizer=weight_regularizer)
+            x = tf.nn.conv2d(input=x, filter=spectral_norm(w), strides=[1, stride, stride, 1], padding=padding)
+            if use_bias:
+                bias = tf.get_variable("bias", [channels], initializer=tf.constant_initializer(0.0))
 
-                    x = tf.nn.bias_add(x, bias)
-            else:
-                x = tf.layers.conv2d(x, filters=channels,
-                                     kernel_size=kernel, kernel_initializer=weight_init,
-                                     kernel_regularizer=weight_regularizer,
-                                     strides=stride, padding=padding, use_bias=use_bias)
+                x = tf.nn.bias_add(x, bias)
+        else:
+            x = tf.layers.conv2d(x, filters=channels,
+                                 kernel_size=kernel, kernel_initializer=weight_init,
+                                 kernel_regularizer=weight_regularizer,
+                                 strides=stride, padding=padding, use_bias=use_bias)
 
         return x
 
@@ -272,11 +267,9 @@ def resblock_down(x_init, channels, use_bias=True, is_training=True, sn=False, s
 
     return relu(x + x_init)
 
-def denseblock(x_init, channels, n_db=6, use_bias=True, is_training=True, sn=False, scope='denseblock') :
-    with tf.variable_scope(scope) :
-        layers = []
-        layers.append(x_init)
-
+def denseblock(x_init, channels, n_db=6, use_bias=True, is_training=True, sn=False, scope='denseblock'):
+    with tf.variable_scope(scope):
+        layers = [x_init]
         with tf.variable_scope('bottle_neck_0') :
             x = conv(x_init, 4 * channels, kernel=1, stride=1, use_bias=use_bias, sn=sn, scope='conv_0')
             x = batch_norm(x, is_training, scope='batch_norm_0')
@@ -319,9 +312,7 @@ def res_denseblock(x_init, channels, n_rdb=20, n_rdb_conv=6, use_bias=True, is_t
 
         for k in range(n_rdb):
             with tf.variable_scope('RDB_' + str(k)):
-                layers = []
-                layers.append(x_init)
-
+                layers = [x_init]
                 x = conv(x_init, channels, kernel=3, stride=1, pad=1, use_bias=use_bias, sn=sn, scope='conv_0')
                 x = batch_norm(x, is_training, scope='batch_norm_0')
                 x = relu(x)
@@ -416,9 +407,7 @@ def squeeze_excitation(x, channels, ratio=16, use_bias=True, sn=False, scope='se
 
         excitation = tf.reshape(excitation, [-1, 1, 1, channels])
 
-        scale = x * excitation
-
-        return scale
+        return x * excitation
 
 
 def convolution_block_attention(x, channels, ratio=16, use_bias=True, sn=False, scope='cbam'):
@@ -517,7 +506,7 @@ def spectral_norm(w, iteration=1):
 
     u_hat = u
     v_hat = None
-    for i in range(iteration):
+    for _ in range(iteration):
         """
         power iteration
         Usually iteration = 1 will be enough
@@ -544,7 +533,6 @@ def condition_batch_norm(x, z, is_training=True, scope='batch_norm'):
     # See https://github.com/taki0112/BigGAN-Tensorflow
     with tf.variable_scope(scope):
         _, _, _, c = x.get_shape().as_list()
-        decay = 0.9
         epsilon = 1e-05
 
         test_mean = tf.get_variable("pop_mean", shape=[c], dtype=tf.float32,
@@ -558,15 +546,15 @@ def condition_batch_norm(x, z, is_training=True, scope='batch_norm'):
         beta = tf.reshape(beta, shape=[-1, 1, 1, c])
         gamma = tf.reshape(gamma, shape=[-1, 1, 1, c])
 
-        if is_training:
-            batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2])
-            ema_mean = tf.assign(test_mean, test_mean * decay + batch_mean * (1 - decay))
-            ema_var = tf.assign(test_var, test_var * decay + batch_var * (1 - decay))
-
-            with tf.control_dependencies([ema_mean, ema_var]):
-                return tf.nn.batch_normalization(x, batch_mean, batch_var, beta, gamma, epsilon)
-        else:
+        if not is_training:
             return tf.nn.batch_normalization(x, test_mean, test_var, beta, gamma, epsilon)
+        batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2])
+        decay = 0.9
+        ema_mean = tf.assign(test_mean, test_mean * decay + batch_mean * (1 - decay))
+        ema_var = tf.assign(test_var, test_var * decay + batch_var * (1 - decay))
+
+        with tf.control_dependencies([ema_mean, ema_var]):
+            return tf.nn.batch_normalization(x, batch_mean, batch_var, beta, gamma, epsilon)
 
 
 def batch_instance_norm(x, scope='batch_instance_norm'):
@@ -652,13 +640,11 @@ def up_sample(x, scale_factor=2):
 
 
 def global_avg_pooling(x):
-    gap = tf.reduce_mean(x, axis=[1, 2], keepdims=True)
-    return gap
+    return tf.reduce_mean(x, axis=[1, 2], keepdims=True)
 
 
 def global_max_pooling(x):
-    gmp = tf.reduce_max(x, axis=[1, 2], keepdims=True)
-    return gmp
+    return tf.reduce_max(x, axis=[1, 2], keepdims=True)
 
 
 def max_pooling(x, pool_size=2):
@@ -691,15 +677,11 @@ def classification_loss(logit, label) :
     return loss, accuracy
 
 def L1_loss(x, y):
-    loss = tf.reduce_mean(tf.abs(x - y))
-
-    return loss
+    return tf.reduce_mean(tf.abs(x - y))
 
 
 def L2_loss(x, y):
-    loss = tf.reduce_mean(tf.square(x - y))
-
-    return loss
+    return tf.reduce_mean(tf.square(x - y))
 
 
 def huber_loss(x, y):
@@ -710,9 +692,7 @@ def histogram_loss(x, y):
     histogram_x = get_histogram(x)
     histogram_y = get_histogram(y)
 
-    hist_loss = L1_loss(histogram_x, histogram_y)
-
-    return hist_loss
+    return L1_loss(histogram_x, histogram_y)
 
 
 def get_histogram(img, bin_size=0.2):
@@ -728,9 +708,7 @@ def get_histogram(img, bin_size=0.2):
             condition = tf.cast(tf.logical_and(gt, leq), tf.float32)
             hist_entries.append(tf.reduce_sum(condition))
 
-    hist = normalization(hist_entries)
-
-    return hist
+    return normalization(hist_entries)
 
 
 def normalization(x):
@@ -746,26 +724,19 @@ def gram_matrix(x) :
 
     return x
 
-def gram_style_loss(x, y) :
+def gram_style_loss(x, y):
     _, height, width, channels = x.get_shape().as_list()
 
     x = gram_matrix(x)
     y = gram_matrix(y)
 
-    # loss = L2_loss(x, y) # simple version
+    return tf.reduce_mean(tf.square(x - y)) / (channels ** 2 * width * height)
 
-    # Original eqn as a constant to divide i.e 1/(4. * (channels ** 2) * (width * height) ** 2)
-    loss = tf.reduce_mean(tf.square(x - y)) / (channels ** 2 * width * height)  # (4.0 * (channels ** 2) * (width * height) ** 2)
-
-    return loss
-
-def color_consistency_loss(x, y) :
+def color_consistency_loss(x, y):
     x_mu, x_var = tf.nn.moments(x, axes=[1, 2], keep_dims=True)
     y_mu, y_var = tf.nn.moments(y, axes=[1, 2], keep_dims=True)
 
-    loss = L2_loss(x_mu, y_mu) + 5.0 * L2_loss(x_var, y_var)
-
-    return loss
+    return L2_loss(x_mu, y_mu) + 5.0 * L2_loss(x_var, y_var)
 
 def dice_loss(n_classes, logits, labels):
     """
@@ -776,7 +747,7 @@ def dice_loss(n_classes, logits, labels):
     """
     
     # https://github.com/keras-team/keras/issues/9395
-    
+
     smooth = 1e-7
     dtype = tf.float32
 
@@ -799,8 +770,9 @@ def dice_loss(n_classes, logits, labels):
     num = tf.reduce_sum(p0 * g0, axis=[0, 1, 2])
     den = num + alpha * tf.reduce_sum(p0 * g1, axis=[0, 1, 2]) + beta * tf.reduce_sum(p1 * g0, axis=[0, 1, 2])
 
-    loss = tf.cast(n_classes, dtype=dtype) - tf.reduce_sum((num + smooth) / (den + smooth))
-    return loss
+    return tf.cast(n_classes, dtype=dtype) - tf.reduce_sum(
+        (num + smooth) / (den + smooth)
+    )
 
 
 ##################################################################################
@@ -824,7 +796,7 @@ def discriminator_loss(Ra, loss_func, real, fake):
             real_loss = tf.reduce_mean(tf.square(real_logit - 1.0))
             fake_loss = tf.reduce_mean(tf.square(fake_logit + 1.0))
 
-        if loss_func == 'gan' or loss_func == 'gan-gp' or loss_func == 'dragan':
+        if loss_func in ['gan', 'gan-gp', 'dragan']:
             real_loss = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(real), logits=real_logit))
             fake_loss = tf.reduce_mean(
@@ -843,7 +815,7 @@ def discriminator_loss(Ra, loss_func, real, fake):
             real_loss = tf.reduce_mean(tf.square(real - 1.0))
             fake_loss = tf.reduce_mean(tf.square(fake))
 
-        if loss_func == 'gan' or loss_func == 'gan-gp' or loss_func == 'dragan':
+        if loss_func in ['gan', 'gan-gp', 'dragan']:
             real_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(real), logits=real))
             fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.zeros_like(fake), logits=fake))
 
@@ -851,9 +823,7 @@ def discriminator_loss(Ra, loss_func, real, fake):
             real_loss = tf.reduce_mean(relu(1.0 - real))
             fake_loss = tf.reduce_mean(relu(1.0 + fake))
 
-    loss = real_loss + fake_loss
-
-    return loss
+    return real_loss + fake_loss
 
 
 def generator_loss(Ra, loss_func, real, fake):
@@ -873,7 +843,7 @@ def generator_loss(Ra, loss_func, real, fake):
             fake_loss = tf.reduce_mean(tf.square(fake_logit - 1.0))
             real_loss = tf.reduce_mean(tf.square(real_logit + 1.0))
 
-        if loss_func == 'gan' or loss_func == 'gan-gp' or loss_func == 'dragan':
+        if loss_func in ['gan', 'gan-gp', 'dragan']:
             fake_loss = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(fake), logits=fake_logit))
             real_loss = tf.reduce_mean(
@@ -890,23 +860,19 @@ def generator_loss(Ra, loss_func, real, fake):
         if loss_func == 'lsgan':
             fake_loss = tf.reduce_mean(tf.square(fake - 1.0))
 
-        if loss_func == 'gan' or loss_func == 'gan-gp' or loss_func == 'dragan':
+        if loss_func in ['gan', 'gan-gp', 'dragan']:
             fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.ones_like(fake), logits=fake))
 
         if loss_func == 'hinge':
             fake_loss = -tf.reduce_mean(fake)
 
-    loss = fake_loss + real_loss
+    return fake_loss + real_loss
 
-    return loss
-
-def vdb_loss(mu, logvar, i_c=0.1) :
+def vdb_loss(mu, logvar, i_c=0.1):
     # variational discriminator bottleneck loss
     kl_divergence = 0.5 * tf.reduce_sum(tf.square(mu) + tf.exp(logvar) - 1 - logvar, axis=-1)
 
-    loss = tf.reduce_mean(kl_divergence - i_c)
-
-    return loss
+    return tf.reduce_mean(kl_divergence - i_c)
 
 ##################################################################################
 # KL-Divergence Loss Function

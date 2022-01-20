@@ -123,22 +123,15 @@ def RGB2LAB(srgb):
     a = tf.expand_dims(a, axis=-1)
     b = tf.expand_dims(b, axis=-1)
 
-    x = tf.concat([l, a, b], axis=-1)
+    return tf.concat([l, a, b], axis=-1)
 
-    return x
-
-def LAB2RGB(lab) :
+def LAB2RGB(lab):
     lab = inverse_transform(lab)
 
     rgb = lab_to_rgb(lab)
     rgb = tf.clip_by_value(rgb, 0, 1)
 
-    # r, g, b = tf.unstack(rgb, axis=-1)
-    # rgb = tf.concat([r,g,b], axis=-1)
-
-    x = (rgb * 2) - 1.0
-
-    return x
+    return (rgb * 2) - 1.0
 
 def rgb_to_lab(srgb):
     with tf.name_scope('rgb_to_lab'):
